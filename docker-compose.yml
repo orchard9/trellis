@@ -1,0 +1,167 @@
+# Trellis Development Environment
+# Simple, powerful, one command to start everything
+
+version: '3.8'
+
+services:
+  # ClickHouse - Our analytics powerhouse
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: trellis-clickhouse
+    ports:
+      - "8123:8123"  # HTTP interface
+      - "9000:9000"  # Native protocol
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./scripts/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql
+    environment:
+      CLICKHOUSE_USER: trellis
+      CLICKHOUSE_PASSWORD: trellis_dev
+      CLICKHOUSE_DB: trellis
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Redis - For deduplication and caching
+  redis:
+    image: redis:7-alpine
+    container_name: trellis-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Google Pub/Sub Emulator - For local development
+  pubsub-emulator:
+    image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    container_name: trellis-pubsub
+    ports:
+      - "8085:8085"
+    command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8085 --project=trellis-local
+    environment:
+      PUBSUB_PROJECT_ID: trellis-local
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Trellis API - Our main service (Phase 1: build locally first)
+  # Uncomment after building the binary
+  # trellis-api:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.dev
+  #   container_name: trellis-api
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     TRELLIS_ENV: development
+  #     TRELLIS_PORT: 8080
+  #     CLICKHOUSE_HOST: clickhouse
+  #     CLICKHOUSE_PORT: 9000
+  #     CLICKHOUSE_DATABASE: trellis
+  #     CLICKHOUSE_USER: trellis
+  #     CLICKHOUSE_PASSWORD: trellis_dev
+  #     REDIS_URL: redis://redis:6379
+  #     PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+  #     PUBSUB_PROJECT_ID: trellis-local
+  #     PUBSUB_TOPIC: raw-events
+  #     LOG_LEVEL: debug
+  #   depends_on:
+  #     clickhouse:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     pubsub-emulator:
+  #       condition: service_healthy
+  #   volumes:
+  #     - ./:/app
+  #   command: air  # Hot reload for development
+
+  # Trellis Worker - Processes events from queue
+  # Uncomment after implementing the worker
+  # trellis-worker:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.dev
+  #   container_name: trellis-worker
+  #   environment:
+  #     TRELLIS_ENV: development
+  #     CLICKHOUSE_HOST: clickhouse
+  #     CLICKHOUSE_PORT: 9000
+  #     CLICKHOUSE_DATABASE: trellis
+  #     CLICKHOUSE_USER: trellis
+  #     CLICKHOUSE_PASSWORD: trellis_dev
+  #     REDIS_URL: redis://redis:6379
+  #     PUBSUB_EMULATOR_HOST: pubsub-emulator:8085
+  #     PUBSUB_PROJECT_ID: trellis-local
+  #     PUBSUB_SUBSCRIPTION: raw-events-sub
+  #     LOG_LEVEL: debug
+  #   depends_on:
+  #     clickhouse:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     pubsub-emulator:
+  #       condition: service_healthy
+  #   volumes:
+  #     - ./:/app
+  #   command: go run cmd/worker/main.go
+
+  # Grafana - For beautiful dashboards (Phase 2)
+  # grafana:
+  #   image: grafana/grafana:latest
+  #   container_name: trellis-grafana
+  #   ports:
+  #     - "3000:3000"
+  #   environment:
+  #     GF_SECURITY_ADMIN_PASSWORD: admin
+  #     GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+  #   volumes:
+  #     - grafana-data:/var/lib/grafana
+  #     - ./configs/grafana/dashboards:/etc/grafana/provisioning/dashboards
+  #     - ./configs/grafana/datasources:/etc/grafana/provisioning/datasources
+  #   depends_on:
+  #     - clickhouse
+
+  # Prometheus - For metrics (Phase 2)
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: trellis-prometheus
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./configs/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+  #     - prometheus-data:/prometheus
+  #   command:
+  #     - '--config.file=/etc/prometheus/prometheus.yml'
+  #     - '--storage.tsdb.path=/prometheus'
+
+volumes:
+  clickhouse-data:
+    driver: local
+  redis-data:
+    driver: local
+  grafana-data:
+    driver: local
+  prometheus-data:
+    driver: local
+
+networks:
+  default:
+    name: trellis-network
+    driver: bridge
