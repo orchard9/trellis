@@ -210,7 +210,7 @@ We built Trellis Campaigns to solve the actual problem:
 
 ### For Agencies
 - **Client data completely isolated** with zero leakage risk
-- **White-label campaign management** with your branding
+- **Custom campaign management** for your organization
 - **Cross-client pattern insights** (anonymized and aggregated)
 - **Unlimited historical campaign creation** for new clients
 

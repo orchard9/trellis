@@ -18,7 +18,7 @@ The ingress service is built with Go for maximum performance and uses:
 - **Warden Integration**: Organization-aware authentication and authorization
 - **ClickHouse**: Primary data storage for events and campaigns
 - **Redis**: Deduplication caching and session management
-- **Google Pub/Sub**: Asynchronous event processing pipeline
+- **Async Workers**: Background goroutines for non-blocking event storage
 
 ## Key Features
 
@@ -28,7 +28,7 @@ All endpoints require valid Warden API keys. Traffic is automatically scoped to 
 ### High-Performance Ingestion
 - Sub-100ms redirect latency
 - 100K+ requests/second per node
-- Fire-and-forget Pub/Sub publishing
+- Fire-and-forget async processing
 - Efficient deduplication
 
 ### Flexible Campaign Routing
@@ -36,6 +36,12 @@ All endpoints require valid Warden API keys. Traffic is automatically scoped to 
 - Rule-based traffic routing
 - Retroactive campaign attribution
 - Parameter preservation and forwarding
+
+### Privacy-Conscious User Tracking
+- Generates consistent user IDs without invasive tracking
+- Uses Warden JWT for authenticated users
+- Non-invasive fingerprinting for anonymous users
+- Snowflake ID generation based on organization context
 
 ## API Endpoints
 
@@ -57,7 +63,7 @@ See `.env.example` for all configuration options. Key settings:
 - `WARDEN_ADDRESS`: Warden service endpoint for authentication
 - `CLICKHOUSE_HOST`: ClickHouse database for event storage
 - `REDIS_URL`: Redis instance for caching and deduplication
-- `PUBSUB_PROJECT_ID`: Google Cloud Pub/Sub for event streaming
+- `WORKER_POOL_SIZE`: Number of async workers for event storage (default: 100)
 
 ## Development
 

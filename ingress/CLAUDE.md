@@ -103,9 +103,9 @@ curl -X POST -H "Authorization: Bearer wdn_your_key" \
 - Solution: Add organization_id constraints to all queries
 
 **Issue: Traffic loss during spikes**
-- Check: Pub/Sub publish errors in metrics
-- Debug: Check Pub/Sub quota and connection pool
-- Solution: Increase connection pool size or implement circuit breaker
+- Check: Async worker queue depth and processing errors
+- Debug: Check worker pool capacity and storage connectivity
+- Solution: Scale async workers or implement circuit breaker
 
 ### Debug Commands
 ```bash
@@ -145,7 +145,7 @@ grpcurl -plaintext -H "authorization: Bearer wdn_your_key" localhost:21382 warde
 ## Error Handling Standards
 
 1. **NEVER DROP TRAFFIC DATA**
-   - If Pub/Sub fails, buffer locally and retry
+   - If async processing fails, use dead letter queue
    - If ClickHouse is down, queue events for later processing
    - If Redis is unavailable, allow traffic through without dedup
    - Better to have duplicate data than lost data
@@ -295,8 +295,8 @@ Before deploying any ingress code:
    - Why: Reduces GC pressure at high RPS
 
 4. **Fire-and-forget for non-critical paths**
-   - Mistake: Blocking on Pub/Sub publish
-   - Correct: Async publishing with goroutines
+   - Mistake: Blocking on storage operations in request path
+   - Correct: Async processing with worker goroutines
    - Why: Keeps redirect latency low
 
 5. **Circuit breakers for dependencies**

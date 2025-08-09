@@ -9,11 +9,11 @@ Trellis Campaigns is designed as a modern, organization-aware React frontend tha
 │                     CAMPAIGNS ARCHITECTURE                     │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐  │
-│  │   CDN    │───▶│   React  │───▶│   API    │───▶│ Backend  │  │
-│  │  (Vite)  │    │   App    │    │ Gateway  │    │Services  │  │
-│  │          │    │          │    │          │    │          │  │
-│  └──────────┘    └──────────┘    └──────────┘    └──────────┘  │
+│    ┌──────────┐         ┌──────────┐         ┌──────────┐      │
+│    │  React   │────────▶│   API    │────────▶│ Backend  │      │
+│    │   App    │         │ Gateway  │         │ Services │      │
+│    │  (Vite)  │         │          │         │          │      │
+│    └──────────┘         └──────────┘         └──────────┘      │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
          │
@@ -320,41 +320,38 @@ const AppRouter: React.FC = () => {
 };
 ```
 
-### 5. Real-time Updates
+### 5. Data Polling
 
-**WebSocket Integration for Live Data**
+**Periodic Updates for Dashboard Data**
 ```tsx
-// Real-time analytics updates
-export const useRealtimeAnalytics = (orgId: string) => {
+// Periodic analytics updates
+export const useAnalyticsPolling = (orgId: string, interval = 30000) => {
   const [metrics, setMetrics] = useState<RealtimeMetrics | null>(null);
-  const [isConnected, setIsConnected] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   
-  useEffect(() => {
-    const token = auth.getToken();
-    const ws = new WebSocket(`ws://localhost:8090/api/v1/realtime?token=${token}`);
-    
-    ws.onopen = () => {
-      setIsConnected(true);
-      // Subscribe to organization-specific updates
-      ws.send(JSON.stringify({ 
-        type: 'subscribe',
-        channel: `analytics:${orgId}` 
-      }));
-    };
-    
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'metrics_update') {
-        setMetrics(data.payload);
-      }
-    };
-    
-    ws.onclose = () => setIsConnected(false);
-    
-    return () => ws.close();
+  const fetchMetrics = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const response = await api.analytics.getCurrentMetrics(orgId);
+      setMetrics(response.data);
+    } catch (error) {
+      console.error('Failed to fetch metrics:', error);
+    } finally {
+      setIsLoading(false);
+    }
   }, [orgId]);
   
-  return { metrics, isConnected };
+  useEffect(() => {
+    // Initial fetch
+    fetchMetrics();
+    
+    // Set up polling
+    const pollInterval = setInterval(fetchMetrics, interval);
+    
+    return () => clearInterval(pollInterval);
+  }, [fetchMetrics, interval]);
+  
+  return { metrics, isLoading, refresh: fetchMetrics };
 };
 ```
 
@@ -423,31 +420,40 @@ const TrafficChart: React.FC<{ data: ChartData }> = ({ data }) => {
 
 ### 1. Authentication Flow
 ```tsx
-// Organization-aware authentication
+// Warden-based authentication with JWT tokens
 export const useAuth = () => {
   const [user, setUser] = useState<User | null>(null);
   const [organization, setOrganization] = useState<Organization | null>(null);
   
   const login = async (credentials: LoginCredentials) => {
-    const response = await auth.login(credentials);
+    // Authenticate with Warden to get JWT token
+    const response = await wardenAuth.login(credentials);
     
-    // Store token and organization context
-    localStorage.setItem('token', response.token);
+    // Store Warden JWT and organization context
+    localStorage.setItem('warden_token', response.jwt);
     setUser(response.user);
     setOrganization(response.organization);
     
-    // Configure API client
+    // Configure API client with Warden token
+    api.setAuthToken(response.jwt);
     api.setOrganization(response.organization.id);
   };
   
-  const logout = () => {
-    localStorage.removeItem('token');
-    setUser(null);
-    setOrganization(null);
-    api.setOrganization(null);
+  const switchOrganization = async (orgId: string) => {
+    // Warden handles multi-org users
+    const newContext = await wardenAuth.switchOrganization(orgId);
+    setOrganization(newContext.organization);
+    api.setOrganization(newContext.organization.id);
   };
   
-  return { user, organization, login, logout };
+  const logout = () => {
+    localStorage.removeItem('warden_token');
+    setUser(null);
+    setOrganization(null);
+    api.clearAuth();
+  };
+  
+  return { user, organization, login, logout, switchOrganization };
 };
 ```
 

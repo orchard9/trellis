@@ -110,10 +110,10 @@ http://localhost:3000/campaigns/{campaign_id}/analytics
 - Debug: React DevTools Profiler for render bottlenecks
 - Solution: Implement pagination, memoization, or data virtualization
 
-**Issue: Real-time updates not working**
-- Check: WebSocket connection status in browser dev tools
-- Debug: Network tab for WebSocket handshake failures
-- Solution: Check WebSocket proxy configuration and authentication
+**Issue: Dashboard data not updating**
+- Check: API polling interval and response times
+- Debug: Network tab for failed API requests
+- Solution: Check API endpoint availability and authentication
 
 **Issue: Charts not rendering or showing incorrect data**
 - Check: Data format and API response structure  
@@ -207,24 +207,27 @@ export const useCampaigns = (orgId: string) => {
 
 ### Real-time Updates Pattern
 ```tsx
-// WebSocket integration for live campaign metrics
-export const useRealtimeMetrics = (orgId: string, campaignId?: string) => {
-  const [metrics, setMetrics] = useState<RealtimeMetrics | null>(null);
+// Polling for campaign metrics updates
+export const useMetricsPolling = (orgId: string, campaignId?: string) => {
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
   
   useEffect(() => {
-    const token = auth.getToken();
-    const ws = new WebSocket(
-      `ws://localhost:8090/api/v1/realtime?token=${token}&org=${orgId}`
-    );
-    
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (campaignId && data.campaign_id !== campaignId) return;
+    const fetchMetrics = async () => {
+      const endpoint = campaignId 
+        ? `/api/v1/campaigns/${campaignId}/metrics`
+        : `/api/v1/analytics/current`;
       
-      setMetrics(data.metrics);
+      const response = await api.get(endpoint);
+      setMetrics(response.data);
     };
     
-    return () => ws.close();
+    // Initial fetch
+    fetchMetrics();
+    
+    // Poll every 30 seconds
+    const interval = setInterval(fetchMetrics, 30000);
+    
+    return () => clearInterval(interval);
   }, [orgId, campaignId]);
   
   return metrics;
@@ -309,21 +312,28 @@ describe('Dashboard Performance', () => {
 ### Real-time Updates Testing
 ```tsx
 describe('Real-time Campaign Updates', () => {
-  it('should update metrics when WebSocket receives data', async () => {
-    const mockWebSocket = new MockWebSocket();
+  it('should update metrics on polling interval', async () => {
+    const mockApi = jest.spyOn(api, 'get');
+    mockApi.mockResolvedValueOnce({ 
+      data: { clicks: 0, conversions: 0 } 
+    });
+    
     render(<CampaignMetrics campaignId="test-campaign" />);
     
     // Initial state
     expect(screen.getByTestId('clicks-count')).toHaveTextContent('0');
     
-    // Simulate WebSocket message
-    mockWebSocket.send({
-      type: 'metrics_update',
-      campaign_id: 'test-campaign',
-      metrics: { clicks: 1247, conversions: 38 }
+    // Mock updated data for next poll
+    mockApi.mockResolvedValueOnce({ 
+      data: { clicks: 1247, conversions: 38 } 
     });
     
-    // Should update UI immediately
+    // Fast-forward polling interval
+    act(() => {
+      jest.advanceTimersByTime(30000);
+    });
+    
+    // Should update UI after polling
     await waitFor(() => {
       expect(screen.getByTestId('clicks-count')).toHaveTextContent('1,247');
       expect(screen.getByTestId('conversions-count')).toHaveTextContent('38');
@@ -340,7 +350,7 @@ describe('Real-time Campaign Updates', () => {
    - Never render data without verifying organization ownership
 
 2. **Graceful Degradation**
-   - If WebSocket fails, fall back to polling
+   - If API polling fails, show last known data with timestamp
    - If charts can't render, show tabular data
    - If images fail to load, show meaningful placeholders
 
@@ -351,9 +361,9 @@ describe('Real-time Campaign Updates', () => {
 
 ## Logging Standards
 
-DEBUG = Component renders, state changes, WebSocket messages
+DEBUG = Component renders, state changes, API polling events
 INFO = Successful API calls, navigation events, user interactions
-WARN = Slow performance, API timeouts, WebSocket disconnections
+WARN = Slow performance, API timeouts, polling failures
 ERROR = Failed API calls, rendering errors, authentication failures  
 CRITICAL = Organization data leakage attempts, security violations
 
@@ -438,7 +448,7 @@ interface AppState {
 ### Server State (React Query)
 - Campaign data with automatic refetching
 - Analytics queries with intelligent caching
-- Real-time metrics with WebSocket integration
+- Metrics updates via periodic API polling
 - Pattern discovery with background updates
 
 This architecture ensures Trellis Campaigns delivers a modern, performant, and organization-aware frontend experience for managing traffic attribution campaigns with real-time analytics and AI-powered insights.

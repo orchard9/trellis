@@ -241,7 +241,7 @@ We built Trellis to solve the actual problems:
 
 ### For Agencies  
 - **Client data completely isolated** with zero cross-contamination risk
-- **White-label campaign management** with your branding and workflows
+- **Custom campaign management** tailored to your workflows
 - **Cross-client pattern insights** (anonymized) for competitive advantage
 - **Unlimited historical campaign creation** adds massive value for new clients
 

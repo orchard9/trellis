@@ -35,8 +35,8 @@ Trellis Warehouse is designed as a high-performance, organization-aware analytic
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────┐ │
-│  │   ClickHouse    │    │    BigQuery     │    │    Redis    │ │
-│  │   (Primary)     │    │  (Analytics)    │    │   (Cache)   │ │
+│  │   ClickHouse    │    │   PostgreSQL    │    │    Redis    │ │
+│  │   (Primary)     │    │  (Relational)   │    │   (Cache)   │ │
 │  │                 │    │                 │    │             │ │
 │  └─────────────────┘    └─────────────────┘    └─────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
@@ -88,7 +88,7 @@ func (h *WarehouseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 ```go
 type QueryEngine struct {
     clickhouse clickhouse.Conn
-    bigquery   *bigquery.Client
+    postgres   *sql.DB
     redis      *redis.Client
     
     // Query optimization
@@ -186,10 +186,10 @@ ORDER BY (organization_id, event_date, campaign_id, event_time)
 SAMPLE BY xxHash32(click_id)
 ```
 
-**BigQuery Analytics Views**
+**PostgreSQL Campaign Tables**
 ```sql
--- Materialized views for complex analytics
-CREATE MATERIALIZED VIEW campaign_performance AS
+-- Tables for campaign management and metadata
+CREATE TABLE campaign_performance (
 SELECT 
     organization_id,
     campaign_id,
@@ -228,7 +228,7 @@ GROUP BY 1,2,3,4,5
 type CacheManager struct {
     l1Cache *ristretto.Cache  // In-memory, 100MB
     l2Cache *redis.Client     // Redis, 1GB
-    l3Cache *bigquery.Client  // Pre-computed views
+    l3Cache *sql.DB          // Pre-computed aggregates
 }
 
 type CacheConfig struct {
@@ -255,7 +255,7 @@ func (cm *CacheManager) Get(query *Query) (*QueryResult, bool) {
     
     // 3. Check L3 (pre-computed views)
     if cm.canUsePrecomputed(query) {
-        result := cm.getFromBigQuery(query)
+        result := cm.getFromPostgreSQL(query)
         if result != nil {
             // Populate both L1 and L2
             cm.l1Cache.Set(query.CacheKey(), result, 1)
@@ -441,7 +441,7 @@ func (pd *PatternDiscovery) DiscoverPatterns(orgID string, timeRange TimeRange) 
 - **Compression**: Gzip response compression
 - **CDN integration**: Cache static responses at edge
 - **HTTP/2**: Multiplexed connections for dashboard queries
-- **WebSocket**: Real-time metric updates for dashboards
+- **Polling**: Dashboard updates via periodic API calls
 
 ## Scalability Design
 

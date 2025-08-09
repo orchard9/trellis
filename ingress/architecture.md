@@ -2,212 +2,658 @@
 
 ## System Overview
 
-Trellis Ingress is the data capture service that stores every piece of traffic data for later analysis and campaign creation.
+Trellis Ingress is the traffic routing and data capture service that redirects traffic based on campaign rules while storing every piece of traffic data for later analysis.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                       INGRESS ARCHITECTURE                       │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌──────────┐         ┌──────────┐         ┌──────────┐       │
-│  │  HTTP    │────────▶│  Ingress │────────▶│ClickHouse│       │
-│  │ Request  │         │    API   │         │ BigQuery │       │
-│  └──────────┘         └──────────┘         └──────────┘       │
-│                             │                                   │
-│                             ▼                                   │
-│                      ┌──────────┐                             │
-│                      │  Warden  │                             │
-│                      │   Auth   │                             │
-│                      └──────────┘                             │
+│  ┌──────────┐      ┌──────────┐      ┌──────────┐             │
+│  │  HTTP    │─────▶│  Ingress │─────▶│ Campaign │─────┐       │
+│  │ Request  │      │    API   │      │  Router  │     │       │
+│  └──────────┘      └──────────┘      └──────────┘     │       │
+│                           │                            │       │
+│                           ▼                            ▼       │
+│                    ┌──────────┐                 ┌──────────┐  │
+│                    │  Warden  │                 │ Redirect │  │
+│                    │   Auth   │                 │ Response │  │
+│                    └──────────┘                 └──────────┘  │
+│                           │                                    │
+│                           ▼                                    │
+│                    ┌──────────────────────┐                   │
+│                    │   Data Storage       │                   │
+│                    ├──────────┬───────────┤                   │
+│                    │ClickHouse│PostgreSQL │                   │
+│                    └──────────┴───────────┘                   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Core Functionality
 
-The ingress service has one job: capture traffic data and store it.
+The ingress service has two primary responsibilities:
+1. **Route traffic** based on campaign rules (<50ms redirect latency)
+2. **Capture all traffic data** for retroactive analysis
 
-### 1. Data Capture Endpoint
+### 1. Traffic Routing & Data Capture
 
 ```go
-// POST /events
-// GET /track
-// POST /pixel
-type TrafficEvent struct {
-    // Organization context from Warden
-    OrganizationID string
-    
-    // Everything from the request
-    Timestamp      time.Time
-    Method         string
-    URL            string
-    Headers        map[string]string
-    QueryParams    map[string]string
-    Body           json.RawMessage
-    IP             string
-    UserAgent      string
-    Referer        string
-    
-    // Any additional context
-    EventType      string
-    ClickID        string
-    SessionID      string
+// GET /in - Main traffic ingestion endpoint with redirect
+// GET /in/{campaign_id} - Campaign-specific ingestion
+// POST /postback - Conversion tracking endpoint
+type TrafficHandler struct {
+    router         *CampaignRouter
+    asyncProcessor *AsyncProcessor
+    userTracker    *UserTracker
 }
-```
 
-### 2. Organization Authentication
-
-Every request must include a Warden API key to identify the organization:
-
-```go
-func (h *Handler) CaptureEvent(w http.ResponseWriter, r *http.Request) {
-    // Extract organization from Warden API key
-    orgCtx, err := h.warden.ValidateAPIKey(r.Header.Get("Authorization"))
+func (h *TrafficHandler) HandleTraffic(w http.ResponseWriter, r *http.Request) {
+    start := time.Now()
+    
+    // 1. Extract organization from API key
+    orgCtx, err := h.extractOrganization(r)
     if err != nil {
         http.Error(w, "Unauthorized", http.StatusUnauthorized)
         return
     }
     
-    // Capture all request data
-    event := extractEventData(r)
-    event.OrganizationID = orgCtx.OrganizationID
+    // 2. Generate or retrieve user tracking ID
+    userID := h.userTracker.GetOrCreateUserID(r, orgCtx)
     
-    // Store in data warehouse
-    err = h.storage.StoreEvent(event)
-    if err != nil {
-        log.Error("Failed to store event", err)
-        http.Error(w, "Storage error", http.StatusInternalServerError)
-        return
-    }
+    // 3. Capture all request data
+    event := h.captureEvent(r, orgCtx, userID)
     
-    w.WriteHeader(http.StatusOK)
+    // 4. Determine redirect destination based on campaign rules
+    destination, campaign := h.router.GetDestination(orgCtx, event)
+    event.CampaignID = campaign.ID
+    
+    // 5. Store event asynchronously (non-blocking)
+    h.asyncProcessor.ProcessEvent(event)
+    
+    // 6. Redirect user (<50ms target)
+    h.recordMetrics(time.Since(start), orgCtx.ID, campaign.ID)
+    http.Redirect(w, r, destination, http.StatusFound)
 }
 ```
 
-### 3. Data Storage
+### 2. Campaign Routing Engine
 
-Events are stored in both ClickHouse (for fast queries) and BigQuery (for complex analytics):
+Campaigns have flexible routing rules that can be based on:
+- Direct 1:1 campaign to URL mapping
+- User recognition (returning vs new)
+- GeoIP location
+- Device type
+- Time-based conditions
+- Custom rule expressions
 
-**ClickHouse Schema**
+```go
+type Campaign struct {
+    ID             string
+    OrganizationID string
+    Name           string
+    Status         string // active, paused, archived
+    Destination    string // Default destination URL
+    Rules          []Rule // Ordered list of routing rules
+}
+
+type Rule struct {
+    Type       string      // "direct", "user", "geo", "device", "time", "custom"
+    Conditions []Condition // AND conditions
+    Action     Action      // What to do when conditions match
+    Priority   int         // Rule evaluation order
+}
+
+type Condition struct {
+    Field    string      // e.g., "country", "device_type", "hour_of_day"
+    Operator string      // "equals", "contains", "regex", "in", "between"
+    Value    interface{} // Value(s) to compare against
+}
+
+type Action struct {
+    Type        string // "redirect", "split", "tag"
+    Destination string // Where to send traffic
+    Weight      int    // For split testing
+    Tags        []string // Additional tracking tags
+}
+
+func (r *CampaignRouter) GetDestination(org *Organization, event *Event) (string, *Campaign) {
+    // 1. Check if campaign specified in URL
+    if campaignID := extractCampaignID(event.URL); campaignID != "" {
+        if campaign := r.getCampaign(org.ID, campaignID); campaign != nil {
+            return r.evaluateCampaign(campaign, event), campaign
+        }
+    }
+    
+    // 2. Find matching campaign based on rules
+    campaigns := r.getActiveCampaigns(org.ID)
+    for _, campaign := range campaigns {
+        if destination := r.evaluateCampaign(campaign, event); destination != "" {
+            return destination, campaign
+        }
+    }
+    
+    // 3. Use organization's default campaign
+    if defaultCampaign := r.getCampaign(org.ID, "default"); defaultCampaign != nil {
+        return defaultCampaign.Destination, defaultCampaign
+    }
+    
+    // 4. Fallback (configurable per organization)
+    return org.DefaultDestination, nil
+}
+```
+
+### 3. User Tracking
+
+Generate consistent user IDs without invasive tracking:
+
+```go
+type UserTracker struct {
+    redis *redis.Client
+}
+
+func (ut *UserTracker) GetOrCreateUserID(r *http.Request, org *Organization) string {
+    // 1. Check for Warden JWT (authenticated user)
+    if userID := extractWardenUserID(r); userID != "" {
+        return fmt.Sprintf("wdn_%s", userID)
+    }
+    
+    // 2. Check for existing tracking cookie
+    if cookie, err := r.Cookie("trellis_uid"); err == nil {
+        return cookie.Value
+    }
+    
+    // 3. Generate snowflake ID based on non-invasive fingerprint
+    fingerprint := generateFingerprint(r)
+    userID := generateSnowflakeID(org.ID, fingerprint)
+    
+    // Note: Cookie setting happens after redirect for performance
+    return userID
+}
+
+func generateFingerprint(r *http.Request) string {
+    // Non-invasive fingerprinting using:
+    // - User-Agent family (not full string)
+    // - Accept-Language (normalized)
+    // - IP subnet (not full IP)
+    // This provides consistency without being invasive
+    h := sha256.New()
+    h.Write([]byte(normalizeUserAgent(r.UserAgent())))
+    h.Write([]byte(normalizeLanguage(r.Header.Get("Accept-Language"))))
+    h.Write([]byte(getIPSubnet(r.RemoteAddr)))
+    return hex.EncodeToString(h.Sum(nil))[:16]
+}
+```
+
+### 4. Data Storage
+
+Events are stored in ClickHouse for analytics and PostgreSQL for relational data:
+
+**ClickHouse Schema (Analytics)**
 ```sql
 CREATE TABLE events (
+    -- Core identifiers
     organization_id String,
     event_id UUID DEFAULT generateUUIDv4(),
-    timestamp DateTime64(3),
+    user_id String,
+    session_id String,
     
-    -- Request data
-    method String,
+    -- Event data
+    timestamp DateTime64(3),
+    event_type String,
     url String,
+    
+    -- Campaign attribution
+    campaign_id Nullable(String),
+    click_id String,
+    
+    -- Request details (for retroactive analysis)
+    method String,
     headers String, -- JSON
     query_params String, -- JSON
     body String, -- JSON
+    
+    -- Enriched data
     ip String,
     user_agent String,
     referer String,
+    country FixedString(2),
+    region String,
+    city String,
+    device_type String,
     
-    -- Event metadata
-    event_type String,
-    click_id String,
-    session_id String,
+    -- Tracking
+    is_conversion UInt8 DEFAULT 0,
+    conversion_value Decimal64(2) DEFAULT 0,
     
-    -- Ingestion metadata
+    -- Metadata
     ingested_at DateTime64(3) DEFAULT now64(3)
 )
 ENGINE = MergeTree()
 PARTITION BY (toYYYYMM(timestamp), organization_id)
 ORDER BY (organization_id, timestamp, event_id)
+SAMPLE BY xxHash32(user_id)
+TTL timestamp + INTERVAL 7 YEAR;
 ```
 
-**BigQuery Schema**
+**PostgreSQL Schema (Campaigns & Rules)**
 ```sql
-CREATE TABLE trellis.events (
-    organization_id STRING NOT NULL,
-    event_id STRING NOT NULL,
-    timestamp TIMESTAMP NOT NULL,
+-- Campaigns table
+CREATE TABLE campaigns (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id UUID NOT NULL,
+    campaign_id VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    destination_url TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
     
-    -- Request data stored as JSON for flexibility
-    request_data JSON,
+    UNIQUE(organization_id, campaign_id)
+);
+
+-- Campaign rules table
+CREATE TABLE campaign_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
+    rule_type VARCHAR(50) NOT NULL,
+    conditions JSONB NOT NULL,
+    action JSONB NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Conversion tracking
+CREATE TABLE conversions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id UUID NOT NULL,
+    click_id VARCHAR(255) NOT NULL,
+    event_id UUID NOT NULL,
+    conversion_value DECIMAL(10,2),
+    metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
     
-    -- Extracted fields for common queries
-    event_type STRING,
-    click_id STRING,
-    session_id STRING,
-    source STRING,
-    medium STRING,
-    campaign STRING,
-    
-    -- Metadata
-    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
-)
-PARTITION BY DATE(timestamp)
-CLUSTER BY organization_id, event_type;
+    UNIQUE(organization_id, click_id)
+);
 ```
 
-### 4. API Endpoints
+### 5. Async Processing Architecture
+
+Events are processed asynchronously to maintain sub-50ms redirect latency:
+
+```go
+type AsyncProcessor struct {
+    workers    int
+    eventQueue chan *Event
+    dlq        *DeadLetterQueue
+    storage    *StorageEngine
+    wg         sync.WaitGroup
+}
+
+func NewAsyncProcessor(workers int) *AsyncProcessor {
+    ap := &AsyncProcessor{
+        workers:    workers,
+        eventQueue: make(chan *Event, workers * 100),
+        dlq:        NewDeadLetterQueue(),
+        storage:    NewStorageEngine(),
+    }
+    
+    // Start worker pool
+    for i := 0; i < workers; i++ {
+        ap.wg.Add(1)
+        go ap.worker(i)
+    }
+    
+    return ap
+}
+
+func (ap *AsyncProcessor) worker(id int) {
+    defer ap.wg.Done()
+    
+    for event := range ap.eventQueue {
+        // Try to store event
+        if err := ap.storage.StoreEvent(event); err != nil {
+            // On failure, add to dead letter queue
+            ap.dlq.Enqueue(event)
+            log.WithError(err).WithField("worker", id).Error("Failed to store event")
+        }
+    }
+}
+
+func (ap *AsyncProcessor) ProcessEvent(event *Event) {
+    select {
+    case ap.eventQueue <- event:
+        // Event queued successfully
+    default:
+        // Queue full, use dead letter queue
+        ap.dlq.Enqueue(event)
+        log.Warn("Event queue full, added to DLQ")
+    }
+}
+```
+
+### 6. Dead Letter Queue
+
+Handle storage failures without losing data:
+
+```go
+type DeadLetterQueue struct {
+    redis      *redis.Client
+    maxRetries int
+    batchSize  int
+}
+
+
+// Background worker processes dead letter queue
+func (dlq *DeadLetterQueue) ProcessQueue() {
+    for {
+        events := dlq.dequeueBatch(dlq.batchSize)
+        for _, event := range events {
+            retries := dlq.getRetryCount(event.ID)
+            if retries >= dlq.maxRetries {
+                // Move to permanent failure storage
+                dlq.moveToFailureLog(event)
+                continue
+            }
+            
+            // Retry storage
+            if err := storage.StoreEvent(event); err != nil {
+                dlq.incrementRetry(event.ID)
+                dlq.requeueWithBackoff(event, retries)
+            }
+        }
+        
+        time.Sleep(10 * time.Second)
+    }
+}
+```
+
+### 6. API Endpoints
 
 ```
-POST /events
-- Capture structured event data
-- Request body: JSON event data
-- Response: 200 OK or error
+GET /in
+- Main traffic ingestion with redirect
+- Query params captured and stored
+- Response: 302 redirect based on campaign rules
 
-GET /track 
-- Capture data via query parameters
-- Example: /track?event=pageview&page=/home&source=google
-- Response: 200 OK or 1x1 pixel
+GET /in/{campaign_id}
+- Campaign-specific ingestion
+- Forces specific campaign attribution
+- Response: 302 redirect to campaign destination
 
-POST /pixel
-- Capture data from tracking pixels
-- Supports both GET and POST
-- Returns transparent 1x1 GIF
+POST /postback
+- Conversion tracking endpoint
+- Updates conversion status for click_id
+- Response: 200 OK
 
-POST /batch
-- Bulk event ingestion
-- Request body: Array of events
-- Response: 200 OK with success/failure counts
+GET /pixel
+- Tracking pixel endpoint
+- Returns 1x1 transparent GIF
+- Captures impression data
+
+POST /campaigns
+- Create/update campaign (requires org auth)
+- Define routing rules and destinations
+- Response: Campaign configuration
+
+GET /health
+- Health check endpoint
+- No authentication required
+- Response: Service status
 ```
 
-## Data Flow
+## Campaign Routing Examples
 
-1. **Receive Request**: HTTP request arrives with tracking data
-2. **Authenticate**: Validate Warden API key, extract organization context
-3. **Extract Data**: Capture all request information (headers, params, body)
-4. **Enrich**: Add metadata like timestamps and IDs
-5. **Store**: Write to both ClickHouse and BigQuery
-6. **Respond**: Return success response or pixel
+### Example 1: Direct Campaign Mapping
+```json
+{
+  "campaign_id": "summer_2024",
+  "name": "Summer Sale 2024",
+  "destination": "https://shop.example.com/summer-sale",
+  "rules": [
+    {
+      "type": "direct",
+      "priority": 100,
+      "action": {
+        "type": "redirect",
+        "destination": "https://shop.example.com/summer-sale",
+        "append_params": true
+      }
+    }
+  ]
+}
+```
+**URL**: `https://track.example.com/in/summer_2024?click_id=abc123&source=facebook`
+**Result**: Redirects to `https://shop.example.com/summer-sale?click_id=abc123&source=facebook`
 
-## Design Principles
+### Example 2: Geographic Routing
+```json
+{
+  "campaign_id": "global_launch",
+  "name": "Global Product Launch",
+  "rules": [
+    {
+      "type": "geo",
+      "priority": 90,
+      "conditions": [
+        {"field": "country", "operator": "in", "value": ["US", "CA"]}
+      ],
+      "action": {
+        "type": "redirect",
+        "destination": "https://na.example.com/launch"
+      }
+    },
+    {
+      "type": "geo",
+      "priority": 80,
+      "conditions": [
+        {"field": "country", "operator": "in", "value": ["GB", "DE", "FR"]}
+      ],
+      "action": {
+        "type": "redirect",
+        "destination": "https://eu.example.com/launch"
+      }
+    },
+    {
+      "type": "direct",
+      "priority": 10,
+      "action": {
+        "type": "redirect",
+        "destination": "https://global.example.com/launch"
+      }
+    }
+  ]
+}
+```
 
-### 1. Store Everything
-- Never drop data because we don't understand it yet
-- Keep raw request data for future analysis
-- Storage is cheap, lost data is expensive
+### Example 3: User Recognition Routing
+```json
+{
+  "campaign_id": "retention_campaign",
+  "name": "Customer Retention",
+  "rules": [
+    {
+      "type": "user",
+      "priority": 100,
+      "conditions": [
+        {"field": "user_type", "operator": "equals", "value": "returning"}
+      ],
+      "action": {
+        "type": "redirect",
+        "destination": "https://shop.example.com/welcome-back",
+        "tags": ["returning_user", "vip"]
+      }
+    },
+    {
+      "type": "user",
+      "priority": 90,
+      "conditions": [
+        {"field": "user_type", "operator": "equals", "value": "new"}
+      ],
+      "action": {
+        "type": "redirect",
+        "destination": "https://shop.example.com/first-time-offer"
+      }
+    }
+  ]
+}
+```
 
-### 2. Schema Flexibility  
-- Store structured data in JSON columns
-- Allow new fields without schema changes
-- Enable retroactive parsing of historical data
+### Example 4: Device-Based Routing
+```json
+{
+  "campaign_id": "mobile_app_download",
+  "name": "Mobile App Campaign",
+  "rules": [
+    {
+      "type": "device",
+      "priority": 100,
+      "conditions": [
+        {"field": "device_type", "operator": "equals", "value": "mobile"},
+        {"field": "os", "operator": "equals", "value": "ios"}
+      ],
+      "action": {
+        "type": "redirect",
+        "destination": "https://apps.apple.com/app/example"
+      }
+    },
+    {
+      "type": "device",
+      "priority": 90,
+      "conditions": [
+        {"field": "device_type", "operator": "equals", "value": "mobile"},
+        {"field": "os", "operator": "equals", "value": "android"}
+      ],
+      "action": {
+        "type": "redirect",
+        "destination": "https://play.google.com/store/apps/details?id=com.example"
+      }
+    },
+    {
+      "type": "device",
+      "priority": 80,
+      "conditions": [
+        {"field": "device_type", "operator": "equals", "value": "desktop"}
+      ],
+      "action": {
+        "type": "redirect",
+        "destination": "https://example.com/download"
+      }
+    }
+  ]
+}
+```
 
-### 3. Organization Isolation
-- Every event tagged with organization_id
-- Data partitioned by organization for performance
-- No possibility of cross-organization data access
+### Example 5: Time-Based Routing
+```json
+{
+  "campaign_id": "flash_sale",
+  "name": "Weekend Flash Sale",
+  "rules": [
+    {
+      "type": "time",
+      "priority": 100,
+      "conditions": [
+        {"field": "day_of_week", "operator": "in", "value": ["saturday", "sunday"]},
+        {"field": "hour", "operator": "between", "value": [10, 20]}
+      ],
+      "action": {
+        "type": "redirect",
+        "destination": "https://shop.example.com/flash-sale-active"
+      }
+    },
+    {
+      "type": "direct",
+      "priority": 10,
+      "action": {
+        "type": "redirect",
+        "destination": "https://shop.example.com/flash-sale-coming-soon"
+      }
+    }
+  ]
+}
+```
 
-### 4. Simple and Reliable
-- Minimal processing in the ingestion path
-- No complex validation or transformation
-- Focus on capture completeness over real-time processing
+### Example 6: A/B Split Testing
+```json
+{
+  "campaign_id": "landing_page_test",
+  "name": "Landing Page A/B Test",
+  "rules": [
+    {
+      "type": "custom",
+      "priority": 100,
+      "action": {
+        "type": "split",
+        "destinations": [
+          {
+            "url": "https://example.com/landing-a",
+            "weight": 50,
+            "tag": "variant_a"
+          },
+          {
+            "url": "https://example.com/landing-b",
+            "weight": 30,
+            "tag": "variant_b"
+          },
+          {
+            "url": "https://example.com/landing-c",
+            "weight": 20,
+            "tag": "variant_c"
+          }
+        ]
+      }
+    }
+  ]
+}
+```
 
-## Performance Considerations
+### Fallback Behavior
+When no campaign matches, the system follows this hierarchy:
+1. Check for campaign ID in URL path (`/in/{campaign_id}`)
+2. Evaluate all active campaign rules in priority order
+3. Use organization's default campaign if configured
+4. Fall back to organization's default destination URL
+5. Return 404 if no destination is configured
 
-- **Batch writes**: Buffer events and write in batches to ClickHouse
-- **Async processing**: Return response immediately, process in background
-- **Compression**: Use ClickHouse compression for efficient storage
-- **Partitioning**: Partition by time and organization for query performance
+## Retroactive Campaign Management
 
-## Integration with Other Services
+Campaigns can be created, updated, or deleted retroactively:
 
-- **Warehouse Service**: Queries the stored events for analytics
-- **Campaigns Service**: Uses stored data to create retroactive campaigns
-- **Pattern Discovery**: Analyzes historical data to find opportunities
+```go
+func (s *CampaignService) ApplyRetroactiveCampaign(ctx context.Context, campaign Campaign, timeRange TimeRange) error {
+    // 1. Validate campaign belongs to organization
+    if err := s.validateOrganization(ctx, campaign); err != nil {
+        return err
+    }
+    
+    // 2. Update historical data in ClickHouse
+    query := `
+        ALTER TABLE events 
+        UPDATE campaign_id = ? 
+        WHERE organization_id = ?
+          AND timestamp BETWEEN ? AND ?
+          AND campaign_id IS NULL
+          AND (conditions matching campaign rules)
+    `
+    
+    // 3. Execute retroactive attribution
+    return s.clickhouse.Exec(ctx, query, campaign.ID, campaign.OrganizationID, timeRange.Start, timeRange.End)
+}
+```
 
-The ingress service is intentionally simple - its only job is to reliably capture and store traffic data so the other services can analyze it later.
+## Performance Targets
+
+- **Redirect latency**: <50ms p99 (critical path)
+- **Data capture**: Async, non-blocking
+- **Rule evaluation**: <5ms for complex rules
+- **Throughput**: 100K+ requests/second per node
+- **Storage reliability**: 99.99% with dead letter queue
+
+## Security & Privacy
+
+- **No PII collection**: Only collect necessary attribution data
+- **User privacy**: Non-invasive fingerprinting, no detailed tracking
+- **Data isolation**: Complete organization separation
+- **GDPR compliant**: No personal data that requires deletion
+
+The ingress service balances high-performance traffic routing with comprehensive data capture, enabling both real-time campaign optimization and retroactive attribution analysis.

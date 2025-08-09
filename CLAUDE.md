@@ -90,11 +90,11 @@ Before submitting any code changes, ensure:
 6. Check table sizes: `make db-stats`
 7. Manual compaction: `make db-compact`
 
-### BigQuery Operations
-1. Sync to BigQuery: `make bq-sync`
-2. Create dataset: `make bq-setup`
-3. Export to GCS: `make bq-export`
-4. Query via CLI: `bq query --use_legacy_sql=false "SELECT * FROM trellis.events LIMIT 10"`
+### PostgreSQL Operations
+1. Apply migrations: `make db-migrate-postgres`
+2. Create schema: `make db-schema-postgres`
+3. Backup database: `make db-backup-postgres`
+4. Query via CLI: `psql -d trellis -c "SELECT * FROM campaigns LIMIT 10"`
 
 ## Forge Project Management
 
@@ -154,7 +154,7 @@ Before submitting any code changes, ensure:
    - ClickHouse schema changes needed
    - Go concurrency patterns to use
    - Redis caching strategy
-   - BigQuery sync modifications
+   - PostgreSQL schema modifications
 6. Include specific file paths and line numbers
 7. Add example ClickHouse queries in notes
 8. Assign confidence based on ingestion complexity
@@ -189,7 +189,7 @@ Organization-scoped campaign creation:
 **Issue: High redirect latency (>100ms)**
 - Check: Redis connection pool exhaustion
 - Debug: `redis-cli INFO clients`
-- Check: Pub/Sub publish blocking
+- Check: Async processing blocking
 - Solution: Increase pool size or use fire-and-forget
 
 **Issue: Duplicate detection failing**
@@ -235,7 +235,7 @@ go tool pprof http://localhost:8080/debug/pprof/heap
 
 2. **Ingestion errors**
    - Log and continue for enrichment failures
-   - Return 503 if Pub/Sub is down
+   - Return 503 if storage is unavailable
    - Use circuit breakers for downstream services
    - Implement exponential backoff for retries
 
@@ -287,7 +287,7 @@ NO EMOJIS = Logs must be parseable by log aggregation systems
 - **Ingestion rate**: 100K+ requests/second per node
 - **Redirect latency**: <50ms p99
 - **Dedup check**: <10ms
-- **Pub/Sub publish**: Fire-and-forget (non-blocking)
+- **Async processing**: Fire-and-forget (non-blocking)
 - **Batch insert**: 1000 events per batch
 - **Query performance**: <2s for 1B rows
 - **Memory usage**: <1GB per 100K RPS
@@ -318,8 +318,8 @@ go run cmd/simulator/main.go --scenario fuzz --iterations 10000
 *Lessons learned from building high-throughput systems:*
 
 1. **Always use fire-and-forget for non-critical paths**
-   - Mistake: Blocking on Pub/Sub publish in request path
-   - Correct: Use goroutine for publishing
+   - Mistake: Blocking on async operations in request path
+   - Correct: Use goroutines for background processing
    - Why: Reduces p99 latency by 50%
 
 2. **Batch everything going to ClickHouse**
@@ -348,7 +348,7 @@ When things go wrong, check in this order:
 1. Health endpoint responding?
 2. Redis connected and responsive?
 3. ClickHouse accepting inserts?
-4. Pub/Sub messages flowing?
+4. Background workers processing?
 5. Worker goroutines within limits?
 6. Memory usage stable?
 7. Disk space available?

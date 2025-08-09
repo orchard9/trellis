@@ -16,7 +16,7 @@ Production: https://warehouse.trellis.orchard9.com/
 
 ## How to develop locally
 
-1. Ensure prerequisites: Go 1.21+, Docker, Make, ClickHouse, Redis, BigQuery emulator, Warden service
+1. Ensure prerequisites: Go 1.21+, Docker, Make, ClickHouse, Redis, PostgreSQL, Warden service
 2. Clone repository and navigate to warehouse directory: `cd warehouse/`
 3. Run `cp .env.example .env` and configure environment variables
 4. Set up Warden organization and API key:

@@ -184,15 +184,15 @@ const attributionJourney = {
 
 ### Phase 3: Automation (Q2 2025)
 - 📋 Self-optimizing campaigns
-- 📋 Automated budget allocation
-- 📋 Smart bidding recommendations  
+- 📋 Automated traffic distribution
+- 📋 Performance-based recommendations  
 - 📋 Predictive performance modeling
 - 📋 Anomaly detection and alerting
 
 ### Phase 4: Ecosystem (Q4 2025)
 - 📋 Third-party integrations (Facebook Ads, Google Ads, etc.)
 - 📋 Custom webhook builder
-- 📋 White-label campaign management
+- 📋 Custom branding and configuration
 - 📋 Advanced collaboration features
 - 📋 Enterprise governance and approval workflows
 

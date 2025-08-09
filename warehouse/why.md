@@ -48,7 +48,7 @@ Trellis Warehouse is built on the principle that **your data should answer any q
 3. **Performance Without Compromise**
    - Sub-second queries on billion-row datasets
    - Intelligent caching that learns your patterns
-   - Multi-engine architecture (ClickHouse + BigQuery)
+   - Multi-engine architecture (ClickHouse + PostgreSQL)
    - Automatic query optimization
 
 ### The Warehouse Advantage
@@ -86,8 +86,8 @@ Question → Flexible Engine → Raw Data → Real-time Answer
 ## Technical Excellence
 
 ### Multi-Engine Architecture
-- **ClickHouse**: Real-time analytics on hot data (<90 days)
-- **BigQuery**: Complex analytics on cold data (>90 days)
+- **ClickHouse**: Real-time analytics and event storage
+- **PostgreSQL**: Campaign metadata and relational data
 - **Automatic Routing**: System chooses the optimal engine for each query
 
 ### Organization-Aware Performance
@@ -115,7 +115,7 @@ cache_strategy:
 
 ## Why Now?
 
-1. **Columnar Databases Mature**: ClickHouse and BigQuery make billion-row queries practical
+1. **Columnar Databases Mature**: ClickHouse makes billion-row queries practical
 2. **Cloud Storage Cheap**: Keeping everything costs less than losing insights
 3. **Analytics Democratized**: Business users need direct access to data
 4. **Real-Time Decisions**: Modern business moves too fast for batch analytics

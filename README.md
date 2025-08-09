@@ -21,7 +21,7 @@ Trellis captures every bit of incoming traffic data and enables retroactive anal
 ### **Data Warehouse Native**
 
 -   ClickHouse for blazing-fast analytics
--   BigQuery integration for complex analysis
+-   PostgreSQL for campaign management and metadata
 -   SQL-accessible raw data
 
 ### **Scale Ready**
@@ -199,14 +199,14 @@ curl -X POST -H "Authorization: Bearer wdn_your_api_key" \
 ### Data Warehouse Sync (Organization-Partitioned)
 
 ```yaml
-# BigQuery automatic sync with organization isolation
+# PostgreSQL for campaign and organization data
 Dataset: trellis_raw
 Tables:
     - events_YYYYMMDD (partitioned by date and organization_id)
     - aggregates_hourly (organization-scoped aggregations)
     - campaign_attribution (per-organization campaign data)
 # Each organization's data is isolated:
-# - Separate BigQuery datasets per organization
+# - Organization-scoped tables with row-level isolation
 # - Organization-specific access controls
 # - Isolated data export processes
 ```
@@ -260,7 +260,7 @@ Tables:
                     └──────────────┘              │
                            │                      ▼
                            │              ┌─────────────┐
-                           └─────────────▶│  BigQuery   │
+                           └─────────────▶│ PostgreSQL  │
                                          └─────────────┘
 ```
 
